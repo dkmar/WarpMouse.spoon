@@ -12,22 +12,22 @@ local getCurrentScreen <const> = hs.mouse.getCurrentScreen
 local absolutePosition <const> = hs.mouse.absolutePosition
 local screenFind <const>       = hs.screen.find
 local isPointInRect <const>    = hs.geometry.isPointInRect
-WarpMouse.logger               = hs.logger.new(WarpMouse.name)
+WarpMouse.logger               = hs.logger.new(WarpMouse.name, 0)
 
 -- a global variable that PaperWM can use to disable the eventtap while Mission Control is open
 _WarpMouseEventTap             = nil
+
+-- Tweakables ---------------------------------------------------------------
+local BORDER = 1             -- border width to treat as "at the edge" (px)
+local RESET_DISTANCE = 25    -- px you must travel *into* a display to re-arm warp
+------------------------------------------------------------------------
 
 local function relative_y(y, current_frame, new_frame)
     return new_frame.h * (y - current_frame.y) / current_frame.h + new_frame.y
 end
 
-local function warp(from, to, current_frame, new_frame)
-    absolutePosition(current_frame.center)
-    absolutePosition(new_frame.center)
+local function warp(to)
     absolutePosition(to)
-    if WarpMouse.logger.getLogLevel() < 5 then
-        WarpMouse.logger.df("Warping mouse from %s to %s", hs.inspect(from), hs.inspect(to))
-    end
 end
 
 local function get_screen(cursor, frames)
@@ -40,19 +40,23 @@ local function get_screen(cursor, frames)
 end
 
 function WarpMouse:start()
-    self.screens = hs.screen.allScreens()
+    local screens = hs.screen.allScreens()
 
-    table.sort(self.screens, function(a, b)
+    table.sort(screens, function(a, b)
         -- sort list by screen postion top to bottom
         return select(2, a:position()) < select(2, b:position())
     end)
 
-    for i, screen in ipairs(self.screens) do
-        self.screens[i] = screen:fullFrame()
+    for i, screen in ipairs(screens) do
+        screens[i] = screen:fullFrame()
     end
 
     self.logger.f("Starting with screens from left to right: %s",
-        hs.inspect(self.screens))
+        hs.inspect(screens))
+
+    -- can we warp?
+    local warpEligible = true
+    local screenID = get_screen(hs.mouse.absolutePosition(), screens)
 
     _WarpMouseEventTap = hs.eventtap.new({
         hs.eventtap.event.types.mouseMoved,
@@ -60,18 +64,32 @@ function WarpMouse:start()
         hs.eventtap.event.types.rightMouseDragged,
     }, function(event)
         local cursor = event:location()
-        local index, frame = get_screen(cursor, self.screens)
-        if cursor.x == frame.x then
-            local left_frame = self.screens[index - 1]
+        local frame = screens[screenID]
+        if not warpEligible then
+            warpEligible = (cursor.x > frame.x + RESET_DISTANCE) and (cursor.x < frame.x2 - RESET_DISTANCE)
+            return false
+        end
+
+        if cursor.x <= frame.x + BORDER then
+            local left_frame = screens[screenID - 1]
             if left_frame then
-                warp(cursor, { x = left_frame.x2 - 2, y = relative_y(cursor.y, frame, left_frame) }, frame, left_frame)
+                warpEligible = false
+                warp({ x = left_frame.x2 - 2, y = relative_y(cursor.y, frame, left_frame) })
+                screenID = screenID - 1
+                -- swallow stale position
+                return true
             end
-        elseif cursor.x > frame.x2 - 0.5 and cursor.x <= frame.x2 then
-            local right_frame = self.screens[index + 1]
+        elseif cursor.x > frame.x2 - BORDER then
+            local right_frame = screens[screenID + 1]
             if right_frame then
-                warp(cursor, { x = right_frame.x + 1, y = relative_y(cursor.y, frame, right_frame) }, frame, right_frame)
+                warpEligible = false
+                warp({ x = right_frame.x + 1, y = relative_y(cursor.y, frame, right_frame) })
+                screenID = screenID + 1
+                -- swallow stale position
+                return true
             end
         end
+        return false
     end):start()
 
     self.screen_watcher = hs.screen.watcher.new(function()
@@ -93,8 +111,6 @@ function WarpMouse:stop()
         self.screen_watcher:stop()
         self.screen_watcher = nil
     end
-
-    self.screens = nil
 end
 
 return WarpMouse
